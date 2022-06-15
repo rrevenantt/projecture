@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust_version: [1.51, 1.61]
+        rust_version: [1.51, 1.61, nightly-2022-04-01]
     name: cargo test
     runs-on: ubuntu-latest
     steps:

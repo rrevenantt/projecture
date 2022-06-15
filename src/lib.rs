@@ -537,8 +537,8 @@ impl<T> DerefMut for Unpinned<T> {
 ///
 ///     let mut cell = MaybeUninit::<Foo>::uninit();
 ///     project!(let Foo { x:x, y:y } = &mut cell);
-///     x.write(1);
-///     y.write(1);
+///     let x: &mut MaybeUninit<usize> = x;
+///     let y: &mut MaybeUninit<usize> = y;
 ///
 ///     struct Bar(usize, usize);
 ///     let mut foo = Bar(1, 2);
