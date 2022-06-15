@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        rust_version: [1.51, 1.63]
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust_version }}
+          default: true
+          profile: minimal
+          components: rustfmt
+      - name: Build
+        run: cargo build --verbose
+      - name: Run tests
+        run: cargo test --verbose
+      - name: miri tests
+        if: startsWith(matrix.rust_version , 'nightly')
+        env:
+          MIRI_FLAGS: -Zmiri-tag-raw-pointers
+        run: |
+          rustup component add miri
+          cargo miri test
+      - name: Formatting
+        run: cargo fmt -- --check
