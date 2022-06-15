@@ -1,7 +1,7 @@
 [package]
 name = "projecture"
 version = "0.0.1"
-edition = "2021"
+edition = "2018"
 authors = ["Konstantin Anisimov <rrevenantt@gmail.com>"]
 homepage = "https://github.com/rrevenantt/projecture"
 repository = "https://github.com/rrevenantt/projecture"
