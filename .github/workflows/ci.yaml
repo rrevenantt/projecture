@@ -36,7 +36,7 @@ jobs:
       - name: miri tests
         if: startsWith(matrix.rust_version , 'nightly')
         env:
-          MIRI_FLAGS: -Zmiri-tag-raw-pointers
+          MIRI_FLAGS: -Zmiri-strict-provenance
         run: |
           rustup component add miri
           cargo miri test

@@ -256,7 +256,10 @@ unsafe impl<'a, T> Projectable for &Helper<&'a Cell<T>> {
     type Marker = &'a Cell<()>;
 
     fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
-        (*self as *const _ as _, Box::leak(Box::new(Cell::new(()))))
+        (
+            unsafe { transmute_copy(*self) },
+            Box::leak(Box::new(Cell::new(()))),
+        )
     }
 }
 impl<'a, T: 'a> ProjectableMarker<T> for &'a Cell<()> {
@@ -276,7 +279,7 @@ unsafe impl<'a, T> Projectable for &Helper<&'a mut MaybeUninit<T>> {
 
     fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
         (
-            unsafe { ptr::read(self as *const _ as *const *mut Self::Target) },
+            unsafe { ptr::read(*self as *const _ as *const *mut Self::Target) },
             Box::leak(Box::new(MaybeUninit::new(()))),
         )
     }
@@ -535,8 +538,8 @@ impl<T> DerefMut for Unpinned<T> {
 ///     *x = 1;
 ///     *y = 1;
 ///
-///     let mut cell = MaybeUninit::<Foo>::uninit();
-///     project!(let Foo { x:x, y:y } = &mut cell);
+///     let mut mu = MaybeUninit::<Foo>::uninit();
+///     project!(let Foo { x:x, y:y } = &mut mu);
 ///     let x: &mut MaybeUninit<usize> = x;
 ///     let y: &mut MaybeUninit<usize> = y;
 ///
