@@ -6,7 +6,7 @@ authors = ["Konstantin Anisimov <rrevenantt@gmail.com>"]
 homepage = "https://github.com/rrevenantt/projecture"
 repository = "https://github.com/rrevenantt/projecture"
 documentation = "https://docs.rs/projecture"
-description = "Easy arbitrary type projections"
+description = "Easy arbitrary type projections without proc macros"
 keywords = ["project","projection","pin","cell"]
 categories = ["rust-patterns"]
 readme = "README.md"
@@ -14,6 +14,12 @@ license = "MIT"
 
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = ["std"]
+std = []
+
 
 [dependencies]
-pin-project = { version = "1", optional=true }
+#memoffset = "0.6.5"
+pin-project = { version = "1", optional = true }
+atomic = { version = "0.5.1", optional = true, default-features = false }
