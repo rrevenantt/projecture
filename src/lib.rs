@@ -31,7 +31,7 @@
 //! see `atomic` module for example of how to do a projection of a transparent field wrapper
 //! or `Pin` for doing projections on a custom reference type
 //!
-//! MSRV: 1.51
+//! MSRV: 1.53
 
 #[cfg(feature = "std")]
 extern crate alloc;
