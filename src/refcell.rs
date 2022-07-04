@@ -42,7 +42,9 @@ unsafe impl<'a, T> Projectable for RefMut<'a, T> {
             // nightly :'( RefMut::leak(unsafe { transmute_copy::<_,Self>(self)}),
             &mut **ManuallyDrop::new(unsafe { transmute_copy::<_, Self>(self) }),
             RefMut::map(unsafe { transmute_copy::<_, Self>(self) }, |_| unsafe {
-                NonNull::<()>::dangling().as_mut()
+                &mut *NonNull::<()>::dangling().as_ptr()
+                // bugged on msrv
+                // NonNull::<()>::dangling().as_mut()
             }),
         )
     }

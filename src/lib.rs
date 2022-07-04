@@ -41,7 +41,7 @@ use alloc::boxed::Box;
 use core::cell::{Cell, UnsafeCell};
 use core::convert::Infallible;
 use core::marker::PhantomData;
-use core::mem::{transmute, transmute_copy, ManuallyDrop, MaybeUninit};
+use core::mem::{transmute_copy, ManuallyDrop, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
 use core::ptr;
@@ -308,7 +308,7 @@ impl<T> Marker<T> {
 // }
 pub trait DerefOwned: Deref {
     /// Drops what's left of `Self` when `Self::Target` was moved out
-    unsafe fn drop_leftovers(leftovers: &mut ManuallyDrop<Self>) {}
+    unsafe fn drop_leftovers(_leftovers: &mut ManuallyDrop<Self>) {}
     fn move_out_target(md: &mut ManuallyDrop<Self>) -> Self::Target
     where
         Self::Target: Sized,
@@ -1089,6 +1089,7 @@ macro_rules! project_field_inner {
         let mut tmp = unsafe {
             use $crate::{ProjectableMarker,Finalizer,SupportsPacked};
             // check for #[packed] struct
+            #[forbid(unaligned_references)]
             if false{
                 $crate::not_packed! { Foo $($field:tt)* }
                 let check_ptr = ( &&($ptr, &$marker, core::marker::PhantomData::<Foo>) ).select();
