@@ -119,52 +119,65 @@ impl<T> DerefMut for Unpinned<T> {
 
 /// For Pin projection to work soundly if struct wants to implement custom Drop it needs to
 /// always go through `Pin<&mut Self>`. So `Drop` implementation must directly delegate to `PinDrop`.
-/// Similar to what `pin_project::pinned_drop` is doing but without proc macros
-/// You can use [`pin_drop`] macro to implement that without `unsafe`
+/// Similar to what `pin_project::pinned_drop` is doing but without proc macros.
+/// You can use [`pin_drop_delegate`] macro to implement such delegating drop without `unsafe`
 pub trait PinDrop {
-    unsafe fn drop(self: Pin<&mut Self>);
+    /// Implementation of drop for pinned struct.
+    /// `marker` parameter exists only to prevent calling this function from safe code.
+    fn drop(self: Pin<&mut Self>, marker: DropMarker);
+}
+
+/// Marker to prevent calling [`PinDrop::drop`] from safe code
+pub struct DropMarker(());
+impl DropMarker {
+    #[doc(hidden)]
+    pub unsafe fn new() -> Self {
+        DropMarker(())
+    }
 }
 
 /// ```rust
 /// # use std::fmt::Debug;
 /// # use std::marker::PhantomPinned;
-/// # use projecture::pin_drop;
+/// # use projecture::{DropMarker, pin_drop_delegate, PinDrop};
 /// # use projecture::project;
 /// # use core::pin::Pin;
-/// struct Foo<'a,T>(&'a T,PhantomPinned) where T:Debug;
-/// pin_drop!{
-/// impl<'a,T> PinDrop for Foo<'a,T> where T:Debug{
-///     fn drop(self: Pin<&mut Self>){
+/// trait Trait<T> {}
+/// struct Foo<'a,T: Trait<usize>>(&'a T, PhantomPinned) where T:Debug;
+///
+/// pin_drop_delegate!{ Foo<'a, T: Trait<usize>> where T: Debug }
+///
+/// impl<'a, T: Trait<usize>> PinDrop for Foo<'a, T> where T: Debug{
+///     fn drop(self: Pin<&mut Self>, _marker: DropMarker){
 ///         project!(let Foo(x,_) = self);
 ///         println!("{:?}",x);
 ///     }
 /// }
-/// }
 /// ```
 #[macro_export]
-macro_rules! pin_drop {
-    (impl PinDrop for $($tail:tt)+ ) => { $crate::pin_drop!{ impl<> PinDrop for $($tail)+ } };
-    (impl < $($tail:tt)+ ) => { $crate::pin_drop!{ [!] [] [] $($tail)+ } };
+macro_rules! pin_drop_delegate {
+    ([ ! $($generics:tt)*] [$($type:tt)*] [] < $($tail:tt)* ) => { $crate::pin_drop_delegate!{[ !! $($generics)* <] [ $($type)*] [] $($tail)*} };
+    ([ ! $($generics:tt)*] [$($type:tt)*] [] << $($tail:tt)* ) => { $crate::pin_drop_delegate!{[ !! $($generics)* <] [ $($type)*] [] < $($tail)*} };
+    ([ !! $($generics:tt)*] [$($type:tt)*] [] > $($tail:tt)* ) => { $crate::pin_drop_delegate!{[ ! $($generics)* >] [ $($type)*] [] $($tail)*} };
+    ([ !! $($generics:tt)*] [$($type:tt)*] [] >> $($tail:tt)* ) => { $crate::pin_drop_delegate!{[ ! $($generics)* >] [ $($type)*] [] > $($tail)*} };
+    ([ !! $($generics:tt)*] [$($type:tt)*] [] $token:tt $($tail:tt)* ) => { $crate::pin_drop_delegate!{[!! $($generics)* $token] [$($type)*] [] $($tail)*} };
 
-    ([ ! $($generics:tt)*] [] [] > PinDrop for $($tail:tt)+ ) => { $crate::pin_drop!{[$($generics)*] [!] [] $($tail)+} };
-    ([ ! $($generics:tt)*] [] [] $token:tt $($tail:tt)+ ) => { $crate::pin_drop!{[ ! $($generics)* $token] [] [] $($tail)+} };
+    ([ ! $($generics:tt)*] [$($type:tt)*] [] , $generic:tt $($tail:tt)* ) => { $crate::pin_drop_delegate!{[ ! $($generics)* , $generic] [ $($type)* , $generic] [] $($tail)*} };
+    ([ ! $($generics:tt)*] [$($type:tt)*] [] > ) => { $crate::pin_drop_delegate!{ [ $($generics)*] [ $($type)* > ] [] } };
+    ([ ! $($generics:tt)*] [$($type:tt)*] [] > where $($tail:tt)* ) => { $crate::pin_drop_delegate!{[ $($generics)*] [ $($type)* >] [$($tail)*]  } };
+    ([ ! $($generics:tt)*] [$($type:tt)*] [] $token:tt $($tail:tt)* ) => { $crate::pin_drop_delegate!{[! $($generics)* $token] [$($type)*] [] $($tail)*} };
 
-    ([$($generics:tt)*] [! $($type:tt)*] [] $body:block ) => { $crate::pin_drop!{[$($generics)*] [ $($type)* ] [] $body } };
-    ([$($generics:tt)*] [! $($type:tt)*] [] where $($tail:tt)* ) => { $crate::pin_drop!{[$($generics)*] [$($type)*] [!] $($tail)*} };
-    ([$($generics:tt)*] [! $($type:tt)*] [] $token:tt $($tail:tt)* ) => { $crate::pin_drop!{[$($generics)*] [! $($type)* $token] [] $($tail)*} };
+    ([$($generics:tt)*] [! $($type:tt)*] [] < $generic:tt $($tail:tt)* ) => { $crate::pin_drop_delegate!{ [ ! $($generics)* $generic] [$($type)* < $generic] [] $($tail)*} };
+    ([$($generics:tt)*] [! $($type:tt)*] [] $name_part:tt $($tail:tt)* ) => { $crate::pin_drop_delegate!{ [ $($generics)* ] [! $($type)* $name_part] [] $($tail)*} };
 
-    ([$($generics:tt)*] [$($type:tt)+] [! $($where:tt)*] $body:tt ) => { $crate::pin_drop!{[$($generics)*] [ $($type)+ ] [ $($where)*] $body } };
-    ([$($generics:tt)*] [$($type:tt)+] [! $($where:tt)*] $token:tt $($tail:tt)* ) => { $crate::pin_drop!{[$($generics)*] [$($type)+] [! $($where)* $token] $($tail)* } };
-
-    ([$($generics:tt)*] [$($type:tt)+] [$($where:tt)*] { fn $($tail:tt)+ } ) => {
+    ([$($generics:tt)*] [$($type:tt)+] [$($where:tt)*] ) => {
         impl<$($generics)*> core::ops::Drop for $($type)+ where $($where)*{
             fn drop(&mut self){
-                unsafe{ $crate::PinDrop::drop(core::pin::Pin::new_unchecked(self)) }
+                unsafe{ $crate::PinDrop::drop(core::pin::Pin::new_unchecked(self), $crate::DropMarker::new()) }
             }
         }
-
-        impl<$($generics)*> $crate::PinDrop for $($type)+ where $($where)*{
-            unsafe fn $($tail)+
-        }
     };
+
+    ( $($tail:tt)* ) => { $crate::pin_drop_delegate!{ [] [!] [] $($tail)* } };
+
 }

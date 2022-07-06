@@ -238,6 +238,16 @@ pub unsafe trait DerefProjectable {
     }
 }
 
+// #[doc(hidden)]
+/// Marker type for the projections used in this crate.
+/// You can use that if you need to reuse existing projections.
+pub struct Marker<T>(PhantomData<T>);
+impl<T> Marker<T> {
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
 #[doc(hidden)]
 pub struct DerefMarkerWrapper<T>(PhantomData<T>);
 impl<T> DerefMarkerWrapper<T> {
@@ -276,29 +286,26 @@ impl<T> DerefMarkerWrapper<T> {
 //--------------
 unsafe impl<T> Projectable for Owned<T> {
     type Target = T;
-    type Marker = [(); 0];
+    type Marker = Marker<()>;
 
     fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
-        (self as *const Self as *mut Self as *mut T, [])
+        (self as *const Self as *mut Self as *mut T, Marker::new())
     }
 }
-impl<T> ProjectableMarker<T> for [(); 0] {
+impl<T> ProjectableMarker<T> for Marker<()> {
     type Output = T;
 
     unsafe fn from_raw(&self, raw: *mut T) -> Self::Output {
-        ptr::read(raw as *const T as *const _)
+        ptr::read_unaligned(raw as *const T as *const _)
     }
 }
 
-// #[doc(hidden)]
-/// Marker type for the projections used in this crate.
-/// You can use that if you need to reuse existing projections.
-pub struct Marker<T>(PhantomData<T>);
-impl<T> Marker<T> {
-    pub fn new() -> Self {
-        Self(PhantomData)
-    }
+unsafe impl<ToCheck, NotPacked> SupportsPacked
+    for &(*mut ToCheck, &Marker<()>, PhantomData<NotPacked>)
+{
+    type Result = NotPacked;
 }
+
 /// Implement this if your type can be unwrapped on a dereference operation when doing
 /// destructuring projection
 // pub trait DerefOwned: Deref {
@@ -308,12 +315,15 @@ impl<T> Marker<T> {
 // }
 pub trait DerefOwned: Deref {
     /// Drops what's left of `Self` when `Self::Target` was moved out
+    ///
+    /// Safety requirements: must not be called twice on the same instance
     unsafe fn drop_leftovers(_leftovers: &mut ManuallyDrop<Self>) {}
-    fn move_out_target(md: &mut ManuallyDrop<Self>) -> Self::Target
+    /// Safety requirements: must not be called twice on the same instance
+    unsafe fn move_out_target(md: &mut ManuallyDrop<Self>) -> Self::Target
     where
         Self::Target: Sized,
     {
-        unsafe { ptr::read(&***md) }
+        ptr::read(&***md)
     }
     fn deref_owned(self) -> Self::Target
     where
@@ -321,7 +331,7 @@ pub trait DerefOwned: Deref {
         Self::Target: Sized,
     {
         let mut md = ManuallyDrop::new(self);
-        let target = Self::move_out_target(&mut md);
+        let target = unsafe { Self::move_out_target(&mut md) };
         unsafe {
             Self::drop_leftovers(&mut md);
         }
@@ -956,7 +966,7 @@ macro_rules! project_struct_fields {
 #[macro_export]
 macro_rules! field_addr {
     ((*$ptr:ident).) => {
-        core::ptr::addr_of_mut!((*$ptr).1)
+        core::ptr::addr_of_mut!((*$ptr).0)
     };
     ((*$ptr:ident).!) => {
         core::ptr::addr_of_mut!((*$ptr).1)
@@ -1091,7 +1101,7 @@ macro_rules! project_field_inner {
             // check for #[packed] struct
             #[forbid(unaligned_references)]
             if false{
-                $crate::not_packed! { Foo $($field:tt)* }
+                $crate::not_packed! { Foo $($field)* }
                 let check_ptr = ( &&($ptr, &$marker, core::marker::PhantomData::<Foo>) ).select();
                 let _ = $crate::deref_field!((*check_ptr). $($field)*);
             }

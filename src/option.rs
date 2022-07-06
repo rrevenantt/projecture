@@ -1,5 +1,5 @@
 use crate::{
-    CustomWrapper, DerefProjectable, FinalizeProjection, Helper, Owned, Projectable,
+    CustomWrapper, DerefProjectable, FinalizeProjection, Helper, Marker, Owned, Projectable,
     ProjectableMarker, SupportsPacked,
 };
 use core::marker::PhantomData;
@@ -25,7 +25,7 @@ unsafe impl<T> Projectable for Option<T> {
     fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
         (
             unsafe { core::mem::transmute(self.as_ref()) },
-            self.as_ref().map(|_| []),
+            self.as_ref().map(|_| Marker::new()),
         )
     }
 }

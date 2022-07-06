@@ -1,6 +1,6 @@
 [package]
 name = "projecture"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2018"
 authors = ["Konstantin Anisimov <rrevenantt@gmail.com>"]
 homepage = "https://github.com/rrevenantt/projecture"
@@ -13,13 +13,11 @@ readme = "README.md"
 license = "MIT"
 
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
 default = ["std"]
 std = []
 
 
 [dependencies]
-#memoffset = "0.6.5"
 pin-project = { version = "1", optional = true }
 atomic = { version = "0.5.1", optional = true, default-features = false }
