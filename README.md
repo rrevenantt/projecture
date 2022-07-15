@@ -67,7 +67,7 @@ Also allows dependent crates to define their own projections via traits.
 see `atomic` module for example of how to do a projection of a transparent field wrapper
 or `Pin` for doing projections on a custom reference type
 
-MSRV: 1.53 <br>
+MSRV: 1.54 <br>
 License: MIT
 
 [`atomic`]: https://docs.rs/atomic
