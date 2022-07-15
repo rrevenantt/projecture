@@ -21,3 +21,6 @@ std = []
 [dependencies]
 pin-project = { version = "1", optional = true }
 atomic = { version = "0.5.1", optional = true, default-features = false }
+
+[dev-dependencies]
+backtrace = "0.3.65"

@@ -21,7 +21,7 @@ macro_rules! impl_pin {
         #[allow(drop_bounds)]
         unsafe impl<'a, T: Drop> Projectable for &Pin<&'a $($maybe_mut)? T> {
             type Target = T;
-            type Marker = Marker<Pin<&'a $($maybe_mut)? ()>>;
+            type Marker = core::convert::Infallible;
 
             fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
                 panic!("struct must also implement PinDrop")
@@ -69,13 +69,13 @@ macro_rules! impl_pin {
                 Pin::new_unchecked(&$($maybe_mut)? *raw)
             }
         }
-        impl<'a, T: Unpin + DerefMut + 'a> ProjectableMarker<T> for DerefMarkerWrapper<Marker<Pin<&'a $($maybe_mut)? ()>>> {
-            type Output = &'a $($maybe_mut)? T::Target;
-
-            unsafe fn from_raw(&self, raw: *mut T) -> Self::Output {
-                &$($maybe_mut)? **raw
-            }
-        }
+        // impl<'a, T: Unpin + DerefMut + 'a> ProjectableMarker<T> for DerefMarkerWrapper<Marker<Pin<&'a $($maybe_mut)? ()>>> {
+        //     type Output = &'a $($maybe_mut)? T::Target;
+        //
+        //     unsafe fn from_raw(&self, raw: *mut T) -> Self::Output {
+        //         &$($maybe_mut)? **raw
+        //     }
+        // }
 
         impl<'a, T: Unpin> FinalizeProjection for Pin<&'a $($maybe_mut)? T> {
             type Output = &'a $($maybe_mut)? T;
@@ -100,7 +100,7 @@ impl_pin! { mut }
 
 //---------------------
 /// Transparent wrapper to indicate that a type should not be pin projected.
-/// It will be removed after projection
+/// It will be removed after projection.
 #[repr(transparent)]
 pub struct Unpinned<T>(pub T);
 impl<T> Unpin for Unpinned<T> {}
@@ -123,23 +123,27 @@ impl<T> DerefMut for Unpinned<T> {
 /// You can use [`pin_drop_delegate`] macro to implement such delegating drop without `unsafe`
 pub trait PinDrop {
     /// Implementation of drop for pinned struct.
-    /// `marker` parameter exists only to prevent calling this function from safe code.
-    fn drop(self: Pin<&mut Self>, marker: DropMarker);
+    fn drop(_self: ProtoPin<&mut Self>);
 }
 
-/// Marker to prevent calling [`PinDrop::drop`] from safe code
-pub struct DropMarker(());
-impl DropMarker {
+/// Trivial wrapper to prevent [`PinDrop::drop`] function to be called from safe code
+pub struct ProtoPin<T>(Pin<T>);
+impl<T> ProtoPin<T> {
     #[doc(hidden)]
-    pub unsafe fn new() -> Self {
-        DropMarker(())
+    pub unsafe fn new(from: Pin<T>) -> Self {
+        ProtoPin(from)
+    }
+    pub fn into_pin(self) -> Pin<T> {
+        self.0
     }
 }
 
+/// Macro to delegate to `PinDrop`.
+///
 /// ```rust
 /// # use std::fmt::Debug;
 /// # use std::marker::PhantomPinned;
-/// # use projecture::{DropMarker, pin_drop_delegate, PinDrop};
+/// # use projecture::{pin_drop_delegate, PinDrop, ProtoPin};
 /// # use projecture::project;
 /// # use core::pin::Pin;
 /// trait Trait<T> {}
@@ -148,8 +152,8 @@ impl DropMarker {
 /// pin_drop_delegate!{ Foo<'a, T: Trait<usize>> where T: Debug }
 ///
 /// impl<'a, T: Trait<usize>> PinDrop for Foo<'a, T> where T: Debug{
-///     fn drop(self: Pin<&mut Self>, _marker: DropMarker){
-///         project!(let Foo(x,_) = self);
+///     fn drop(_self: ProtoPin<&mut Self>){
+///         project!(let Foo(x,_) = _self.into_pin());
 ///         println!("{:?}",x);
 ///     }
 /// }
@@ -173,7 +177,7 @@ macro_rules! pin_drop_delegate {
     ([$($generics:tt)*] [$($type:tt)+] [$($where:tt)*] ) => {
         impl<$($generics)*> core::ops::Drop for $($type)+ where $($where)*{
             fn drop(&mut self){
-                unsafe{ $crate::PinDrop::drop(core::pin::Pin::new_unchecked(self), $crate::DropMarker::new()) }
+                unsafe{ $crate::PinDrop::drop($crate::ProtoPin::new(core::pin::Pin::new_unchecked(self))) }
             }
         }
     };

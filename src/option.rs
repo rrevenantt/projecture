@@ -7,7 +7,7 @@ use core::mem::transmute_copy;
 use core::ptr::null_mut;
 
 unsafe impl<T> CustomWrapper for Option<T> {
-    type Output = Option<T>;
+    type Output = Option<Owned<T>>;
 }
 unsafe impl<'a, T> CustomWrapper for &Option<&'a T> {
     type Output = Option<Helper<&'a T>>;
@@ -18,14 +18,14 @@ unsafe impl<'a, T> CustomWrapper for &Option<&'a mut T> {
 unsafe impl<T: CustomWrapper> CustomWrapper for &&Option<T> {
     type Output = Option<T::Output>;
 }
-unsafe impl<T> Projectable for Option<T> {
+unsafe impl<T> Projectable for Option<Owned<T>> {
     type Target = T;
-    type Marker = Option<<Owned<T> as Projectable>::Marker>;
+    type Marker = OptionMarker<<Owned<T> as Projectable>::Marker>;
 
     fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
         (
             unsafe { core::mem::transmute(self.as_ref()) },
-            self.as_ref().map(|_| Marker::new()),
+            self.as_ref().map(|_| Marker::new()).into(),
         )
     }
 }
@@ -46,19 +46,30 @@ unsafe impl<T> Projectable for Option<T> {
 //         }
 //     }
 // }
+#[repr(transparent)]
+pub struct OptionMarker<T>(Option<T>);
+impl<T> OptionMarker<T> {
+    pub fn check(&self) {}
+}
+impl<T> From<Option<T>> for OptionMarker<T> {
+    fn from(from: Option<T>) -> Self {
+        OptionMarker(from)
+    }
+}
+
 unsafe impl<T> Projectable for &&Option<T>
 where
     T: Projectable,
 {
     type Target = T::Target;
-    type Marker = Option<T::Marker>;
+    type Marker = OptionMarker<T::Marker>;
 
     fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
         if let Some(x) = self {
             let (raw, marker) = x.get_raw();
-            (raw as _, Some(marker))
+            (raw as _, Some(marker).into())
         } else {
-            (null_mut(), None)
+            (null_mut(), None.into())
         }
     }
 }
@@ -67,23 +78,23 @@ where
     &'a T: Projectable,
 {
     type Target = <&'a T as Projectable>::Target;
-    type Marker = Option<<&'a T as Projectable>::Marker>;
+    type Marker = OptionMarker<<&'a T as Projectable>::Marker>;
 
     fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
         if let Some(x) = self {
             let (raw, marker) = x.get_raw();
-            (raw as _, Some(marker))
+            (raw as _, Some(marker).into())
         } else {
-            (null_mut(), None)
+            (null_mut(), None.into())
         }
     }
 }
 
-impl<T, M: ProjectableMarker<T>> ProjectableMarker<T> for Option<M> {
+impl<T, M: ProjectableMarker<T>> ProjectableMarker<T> for OptionMarker<M> {
     type Output = Option<M::Output>;
 
     unsafe fn from_raw(&self, raw: *mut T) -> Self::Output {
-        self.as_ref().map(|m| m.from_raw(raw))
+        self.0.as_ref().map(|m| m.from_raw(raw))
     }
 }
 
@@ -114,14 +125,14 @@ where
     T::Target: Sized,
 {
     type Target = T::Target;
-    type Marker = Option<T::Marker>;
+    type Marker = OptionMarker<T::Marker>;
 
     fn deref_raw(&self) -> (*mut Self::Target, Self::Marker) {
         if let Some(x) = self {
             let (raw, marker) = x.deref_raw();
-            (raw, Some(marker))
+            (raw, Some(marker).into())
         } else {
-            (null_mut(), None)
+            (null_mut(), None.into())
         }
     }
 }
@@ -130,20 +141,20 @@ where
     &'a T: DerefProjectable<Target = Target, Marker = Marker>,
 {
     type Target = Target;
-    type Marker = Option<Marker>;
+    type Marker = OptionMarker<Marker>;
 
     fn deref_raw(&self) -> (*mut Self::Target, Self::Marker) {
         if let Some(x) = self {
             let (raw, marker) = x.deref_raw();
-            (raw, Some(marker))
+            (raw, Some(marker).into())
         } else {
-            (null_mut(), None)
+            (null_mut(), None.into())
         }
     }
 }
 
 unsafe impl<'a, 'b, ToCheck, NotPacked, M> SupportsPacked
-    for &'a (*mut ToCheck, &'b Option<M>, PhantomData<NotPacked>)
+    for &'a (*mut ToCheck, &'b OptionMarker<M>, PhantomData<NotPacked>)
 where
     &'a (*mut ToCheck, &'b M, PhantomData<NotPacked>): SupportsPacked<Result = NotPacked>,
 {

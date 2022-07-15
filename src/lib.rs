@@ -1,37 +1,5 @@
 #![no_std]
-//! ## Projecture
-//!
-//! **This is in a proof of concept state and also internally uses a lot of not yet battle-tested unsafe code
-//! so use it on your own risk meanwhile if you are good with unsafe rust i would appreciate a soundness review**
-//!
-//! Allows to do an arbitrary projections without procedural macros, and as such does not have additional
-//! requirements on target struct, so in comparison to other crates that do similar things
-//! if target struct is located in external crate that crate does not have to explicitly add a support such projection.
-//!
-//! Although as of now this crate doesn't support enums yet, but it will be added soon.
-//!
-//! #### Currently can do following type of projections
-//!  - Destructuring projection (similar to usual `let <pattern>` but also supports deref pattern,
-//!     and also works if struct implements `Drop` which is just not called)
-//!  - Reference projection (similar to match ergonomics in `let <pattern>` but also supports deref pattern)
-//!  - Mutable reference projection (similar to match ergonomics in `let <pattern>` but also supports deref pattern)
-//!  - `Pin` projection
-//!  - `Cell` projection
-//!  - `MaybeUninit` projection
-//!  - `Atomic`(from `atomic` crate) projection
-//!  - `Option` projection (which works together with other kinds of projections)
-//!  - `RefCell` guards projection
-//!  - raw pointers projections (`*const T`, `*mut T`, `NonNull<T>`)
-//!
-//! Also, where possible, projections can additionally project through a `Deref` type
-//!
-//! See [`project`]! macro for usage examples.
-//!
-//! Also allows dependent crates to define their own projections via traits.
-//! see `atomic` module for example of how to do a projection of a transparent field wrapper
-//! or `Pin` for doing projections on a custom reference type
-//!
-//! MSRV: 1.53
+#![doc = include_str!("../README.md")]
 
 #[cfg(feature = "std")]
 extern crate alloc;
@@ -51,13 +19,15 @@ use core::ptr::NonNull;
 #[cfg(feature = "atomic")]
 pub mod atomic;
 
-#[doc(inline)]
+// #[doc(inline)]
 pub use pin::*;
-mod pin;
+/// Pin projection support
+pub mod pin;
 
 // #[doc(hidden)]
 // pub use memoffset::*;
 
+pub use option::OptionMarker;
 mod option;
 mod refcell;
 
@@ -214,6 +184,9 @@ pub unsafe trait Projectable {
 }
 
 /// Trait to wrap raw pointer to a field with a type that corresponds to a projection being done.
+///
+/// Marker also must have an inherent empty `pub fn check(&self){}` function which is used to check that `project!`
+/// macro works on concrete types, and not on generics, you can look at [`Marker::check`] as an example.
 pub trait ProjectableMarker<T: ?Sized> {
     /// Wrapped pointer type
     type Output;
@@ -232,6 +205,7 @@ pub unsafe trait DerefProjectable {
     type Marker;
 
     fn deref_raw(&self) -> (*mut Self::Target, Self::Marker);
+    #[doc(hidden)]
     fn maybe_deref_raw(&self) -> (Option<*mut Self::Target>, Self::Marker) {
         let (a, b) = self.deref_raw();
         (Some(a), b)
@@ -246,42 +220,97 @@ impl<T> Marker<T> {
     pub fn new() -> Self {
         Self(PhantomData)
     }
+
+    pub fn check(&self) {}
 }
 
 #[doc(hidden)]
-pub struct DerefMarkerWrapper<T>(PhantomData<T>);
-impl<T> DerefMarkerWrapper<T> {
-    #[doc(hidden)]
-    pub unsafe fn new(_value: &T) -> Self {
-        Self(PhantomData)
+pub trait AmbiguityCheck {
+    fn check(&self) -> usize {
+        unreachable!()
+    }
+}
+impl<T: ?Sized> AmbiguityCheck for T {}
+
+// #[doc(hidden)]
+// pub struct DerefMarkerWrapper<T>(PhantomData<T>);
+// impl<T> DerefMarkerWrapper<T> {
+//     #[doc(hidden)]
+//     pub unsafe fn new(_value: &T) -> Self {
+//         Self(PhantomData)
+//     }
+// }
+
+#[repr(transparent)]
+pub struct MaybeDerefProjectable<T>(ManuallyDrop<T>);
+impl<T> MaybeDerefProjectable<T> {
+    pub fn new(from: T) -> Self {
+        Self(ManuallyDrop::new(from))
     }
 }
 
-// #[doc(hidden)]
-// pub struct MaybeDerefMarkerWrapper<'a, T>(&'a T);
-// impl<'a, T> MaybeDerefMarkerWrapper<'a, T> {
-//     #[doc(hidden)]
-//     pub unsafe fn new(value: &'a T) -> Self {
-//         Self(value)
-//     }
-// }
-// impl<T, M: ProjectableMarker<T>> ProjectableMarker<T> for MaybeDerefMarkerWrapper<'_, M> {
-//     type Output = M::Output;
-//
-//     unsafe fn from_raw(&self, raw: *mut T) -> Self::Output {
-//         self.0.from_raw(raw)
-//     }
-// }
-// impl<T, M> ProjectableMarker<T> for &MaybeDerefMarkerWrapper<'_, M>
-// where
-//     DerefMarkerWrapper<M>: ProjectableMarker<T>,
-// {
-//     type Output = <DerefMarkerWrapper<M> as ProjectableMarker<T>>::Output;
-//
-//     unsafe fn from_raw(&self, raw: *mut T) -> Self::Output {
-//         DerefMarkerWrapper::new(self.0).from_raw(raw)
-//     }
-// }
+unsafe impl<T: Projectable> DerefProjectable for MaybeDerefProjectable<T> {
+    type Target = T::Target;
+    type Marker = T::Marker;
+
+    fn deref_raw(&self) -> (*mut Self::Target, Self::Marker) {
+        self.0.get_raw()
+    }
+}
+unsafe impl<'a, T, Target, Marker> DerefProjectable for &'a MaybeDerefProjectable<T>
+where
+    &'a T: Projectable<Target = Target, Marker = Marker>,
+{
+    type Target = Target;
+    type Marker = Marker;
+
+    fn deref_raw(&self) -> (*mut Self::Target, Self::Marker) {
+        (&*self.0).get_raw()
+    }
+}
+unsafe impl<'a, 'b, T, Target, Marker> DerefProjectable for &'a &'b MaybeDerefProjectable<T>
+where
+    &'a &'b T: Projectable<Target = Target, Marker = Marker>,
+{
+    type Target = Target;
+    type Marker = Marker;
+
+    fn deref_raw(&self) -> (*mut Self::Target, Self::Marker) {
+        unsafe { &*(self as *const _ as *const &&T) }.get_raw()
+    }
+}
+unsafe impl<'a, 'b, 'c, T, Target, Marker> DerefProjectable for &'a &'b &'c MaybeDerefProjectable<T>
+where
+    &'a &'b &'c T: Projectable<Target = Target, Marker = Marker>,
+{
+    type Target = Target;
+    type Marker = Marker;
+
+    fn deref_raw(&self) -> (*mut Self::Target, Self::Marker) {
+        unsafe { &*(self as *const _ as *const &&&T) }.get_raw()
+    }
+}
+
+unsafe impl<T: DerefProjectable> DerefProjectable for &&&&MaybeDerefProjectable<T> {
+    type Target = T::Target;
+    type Marker = T::Marker;
+
+    fn deref_raw(&self) -> (*mut Self::Target, Self::Marker) {
+        self.0.deref_raw()
+    }
+}
+
+unsafe impl<'a, T> DerefProjectable for &&&&&'a MaybeDerefProjectable<T>
+where
+    &'a T: DerefProjectable,
+{
+    type Target = <&'a T as DerefProjectable>::Target;
+    type Marker = <&'a T as DerefProjectable>::Marker;
+
+    fn deref_raw(&self) -> (*mut Self::Target, Self::Marker) {
+        (&*self.0).deref_raw()
+    }
+}
 
 //--------------
 unsafe impl<T> Projectable for Owned<T> {
@@ -308,11 +337,6 @@ unsafe impl<ToCheck, NotPacked> SupportsPacked
 
 /// Implement this if your type can be unwrapped on a dereference operation when doing
 /// destructuring projection
-// pub trait DerefOwned: Deref {
-//     /// Type that will drop what's left of `Self`, but without `Self::Target`.
-//     type WithManuallyDrop: Deref<Target = ManuallyDrop<Self::Target>>;
-//     fn into_md(self) -> Self::WithManuallyDrop;
-// }
 pub trait DerefOwned: Deref {
     /// Drops what's left of `Self` when `Self::Target` was moved out
     ///
@@ -340,13 +364,6 @@ pub trait DerefOwned: Deref {
 }
 
 #[cfg(feature = "std")]
-// impl<T> DerefOwned for Box<T> {
-//     type WithManuallyDrop = Box<ManuallyDrop<T>>;
-//
-//     fn into_md(self) -> Self::WithManuallyDrop {
-//         unsafe { transmute(self) }
-//     }
-// }
 impl<T> DerefOwned for Box<T> {
     unsafe fn drop_leftovers(leftovers: &mut ManuallyDrop<Self>) {
         ManuallyDrop::drop(&mut *(leftovers as *mut _ as *mut ManuallyDrop<Box<ManuallyDrop<T>>>))
@@ -355,6 +372,9 @@ impl<T> DerefOwned for Box<T> {
 
 #[doc(hidden)]
 pub struct OwnedDropMarker<T: DerefOwned>(*const UnsafeCell<ManuallyDrop<T>>);
+// impl<T: DerefOwned> OwnedDropMarker<T> {
+//     pub fn check() {}
+// }
 impl<'a, T: DerefOwned> Drop for OwnedDropMarker<T> {
     fn drop(&mut self) {
         unsafe { T::drop_leftovers(&mut *(*self.0).get()) }
@@ -488,9 +508,15 @@ impl<'a, T: 'a> ProjectableMarker<T> for Marker<&'a Cell<()>> {
         &*(raw as *mut Cell<T>)
     }
 }
-// unimplemented because it would be unsound
-// impl<'a, T: 'a> ProjectableMarker<T> for DerefMarkerWrapper<&'a Cell<()>> {
 
+unsafe impl<'a, T> Projectable for &Helper<&'a mut Cell<T>> {
+    type Target = T;
+    type Marker = Marker<&'a mut ()>;
+
+    fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
+        (unsafe { transmute_copy(*self) }, Marker::new())
+    }
+}
 //---------------------
 unsafe impl<'a, T> Projectable for &Helper<&'a mut MaybeUninit<T>> {
     type Target = T;
@@ -511,19 +537,18 @@ impl<'a, T: 'a> ProjectableMarker<T> for Marker<&'a mut MaybeUninit<()>> {
     }
 }
 //---------------------
-// unfortunately raw pointer projections are unsound
 unsafe impl<T> CustomWrapper for *mut T {
     type Output = Self;
 }
 unsafe impl<T> Projectable for *mut T {
     type Target = T;
-    type Marker = *mut ();
+    type Marker = Marker<*mut ()>;
 
     fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
-        (*self, &() as *const () as _)
+        (*self, Marker::new())
     }
 }
-impl<T> ProjectableMarker<T> for *mut () {
+impl<T> ProjectableMarker<T> for Marker<*mut ()> {
     type Output = *mut T;
 
     unsafe fn from_raw(&self, raw: *mut T) -> Self::Output {
@@ -537,13 +562,13 @@ unsafe impl<T> CustomWrapper for *const T {
 }
 unsafe impl<T> Projectable for *const T {
     type Target = T;
-    type Marker = *const ();
+    type Marker = Marker<*const ()>;
 
     fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
-        (*self as _, &())
+        (*self as _, Marker::new())
     }
 }
-impl<T> ProjectableMarker<T> for *const () {
+impl<T> ProjectableMarker<T> for Marker<*const ()> {
     type Output = *const T;
 
     unsafe fn from_raw(&self, raw: *mut T) -> Self::Output {
@@ -557,13 +582,13 @@ unsafe impl<T> CustomWrapper for NonNull<T> {
 }
 unsafe impl<T> Projectable for NonNull<T> {
     type Target = T;
-    type Marker = NonNull<()>;
+    type Marker = Marker<NonNull<()>>;
 
     fn get_raw(&self) -> (*mut Self::Target, Self::Marker) {
-        (self.as_ptr(), NonNull::dangling())
+        (self.as_ptr(), Marker::new())
     }
 }
-impl<T> ProjectableMarker<T> for NonNull<()> {
+impl<T> ProjectableMarker<T> for Marker<NonNull<()>> {
     type Output = NonNull<T>;
 
     unsafe fn from_raw(&self, raw: *mut T) -> Self::Output {
@@ -660,21 +685,23 @@ pub unsafe trait SupportsPacked {
         NonNull::dangling().as_ptr()
     }
 }
+
+// todo figure out how to make that implementable by downstream crates
 unsafe impl<ToCheck, NotPacked, M> SupportsPacked for (*mut ToCheck, M, PhantomData<NotPacked>) {
     type Result = ToCheck;
 }
 unsafe impl<ToCheck, NotPacked> SupportsPacked
-    for &(*mut ToCheck, &*mut (), PhantomData<NotPacked>)
+    for &(*mut ToCheck, &Marker<*mut ()>, PhantomData<NotPacked>)
 {
     type Result = NotPacked;
 }
 unsafe impl<ToCheck, NotPacked> SupportsPacked
-    for &(*mut ToCheck, &*const (), PhantomData<NotPacked>)
+    for &(*mut ToCheck, &Marker<*const ()>, PhantomData<NotPacked>)
 {
     type Result = NotPacked;
 }
 unsafe impl<ToCheck, NotPacked> SupportsPacked
-    for &(*mut ToCheck, &NonNull<()>, PhantomData<NotPacked>)
+    for &(*mut ToCheck, &Marker<NonNull<()>>, PhantomData<NotPacked>)
 {
     type Result = NotPacked;
 }
@@ -682,8 +709,14 @@ unsafe impl<ToCheck, NotPacked> SupportsPacked
 /// Macro to do all kinds of projections
 ///
 /// Has two modes:
-///  - `let` syntax very similar to regular rust's `let <pattern> = <expr>`, see examples below.
-///  - single field projection `project!(<variable> -> <field>)` or `project!((<expression>) -> <field>)`
+///  - `let` syntax very similar to regular rust's `let <pattern> = <expr>`.
+///    Basically it is exactly the same but also has additional support for deref patterns and does not yet supports bindings via `@`.
+///  - single field projection `project!(<variable> -> <field>)` or `project!((<expression>) -> <field>)`.
+///     Basically same as doing `let` option with one field, but this one is an expression while `let` one is a statement.
+///     Also this variant additionally tries to do an implicit deref projection if possible.
+///     Note though that you will get an error if inner type of projection implements `Deref`.
+///     This is caused by the fact that Rust's `.` operator(which is used by this macro) can go through an implicit deref call
+///     which would ruin all unsafe logic.
 ///
 /// ```rust
 /// #   use std::cell::Cell;
@@ -768,25 +801,26 @@ unsafe impl<ToCheck, NotPacked> SupportsPacked
 ///         let e: Pin<&mut PhantomPinned> = e;
 ///     }
 /// ```
-/// `Option` projection which also works together with other projections
+/// `Option` projection, which also works together with other projections
 /// ```rust
 /// # use std::marker::PhantomPinned;
 /// # use std::pin::Pin;
 /// # use projecture::project;
+/// #[derive(Default)]
 /// struct Foo{
 ///     x: Box<usize>,
 ///     y: usize,
 ///     p: PhantomPinned
 /// }
-/// fn test(mut arg: Option<Foo>){
-///     project!(let Foo { x: *x, y } = arg.as_mut());
-///     let x: Option<&mut usize> = x;
-///     let y: Option<&mut usize> = y;
+/// let mut arg = Some(Foo::default());
+/// project!(let Foo { x: *x, y } = arg.as_mut());
+/// let x: Option<&mut usize> = x;
+/// let y: Option<&mut usize> = y;
 ///
-///     project!(let Foo { x, y } = arg);
-///     let x: Option<Box<usize>> = x;
-///     let y: Option<usize> = y;
-/// }
+/// project!(let Foo { x, y } = arg);
+/// let x: Option<Box<usize>> = x;
+/// let y: Option<usize> = y;
+///
 /// fn test_pin(arg: Option<Pin<&mut Foo>>){
 ///     project!(let Foo { p, ..} = arg );
 ///     let p: Option<Pin<&mut PhantomPinned>> = p;
@@ -796,15 +830,15 @@ unsafe impl<ToCheck, NotPacked> SupportsPacked
 /// ```rust
 /// # use std::cell::{Ref, RefCell, RefMut};
 /// # use projecture::project;
+/// #[derive(Default)]
 /// struct Foo(String,String);
-/// fn test_ref(arg:&RefCell<Foo>){
-///     project!(let Foo(x,_) = arg.borrow());
-///     let x: Ref<String> = x;
-/// }
-/// fn test_refmut(arg:&RefCell<Foo>){
-///     project!(let Foo(x,_) = arg.borrow_mut());
-///     let x: RefMut<String> = x;
-/// }
+/// let arg = RefCell::new(Foo::default());
+/// project!(let Foo(x,_) = arg.borrow());
+/// let x: Ref<String> = x;
+/// # drop(x);
+///
+/// project!(let Foo(x, ..) = arg.borrow_mut());
+/// let x: RefMut<String> = x;
 /// ```
 /// Raw pointer projection (`*const T`, `*mut T`, `NonNull<T>`).
 /// Note that it is safe because it behaves like a [`pointer::wrapping_offset`](https://doc.rust-lang.org/std/primitive.pointer.html#method.wrapping_offset).
@@ -831,38 +865,46 @@ macro_rules! project {
         let var = core::mem::ManuallyDrop::new($val);
         let var = {
             use $crate::Preprocess;
-            (&&&&&var).preprocess()
+            core::mem::ManuallyDrop::new((&&&&&var).preprocess())
         };
 
         let (ptr,marker) = {
             use $crate::Projectable;
-            (&&&&&&& var).get_raw()
+            (&&&&&&& *var).get_raw()
         };
         if false{
-            let $struct { .. } = unsafe { &*ptr };
+            use $crate::AmbiguityCheck;
+            let _:() = marker.check();
+            // let $struct { .. } = unsafe { &*ptr };
         }
-        $crate::project_struct_fields! { [ptr marker] [] $($fields)+ }
+        $crate::project_struct_fields! { [ptr marker $struct] [] $($fields)+ }
         drop(marker);
     };
     (let $struct:ident ( $($fields:tt)+ ) = $val: expr) => {
         let var = core::mem::ManuallyDrop::new($val);
         let var = {
             use $crate::Preprocess;
-            (&&&&&var).preprocess()
+            core::mem::ManuallyDrop::new((&&&&&var).preprocess())
         };
         let (ptr,marker) = {
             use $crate::Projectable;
-            (&&&&&&& var).get_raw()
+            (&&&&&&& *var).get_raw()
         };
         if false{
-            let $struct { .. } = unsafe{ &*ptr };
+            use $crate::AmbiguityCheck;
+            let _:() = marker.check();
+            // let $struct { .. } = unsafe{ &*ptr };
         }
 
-        $crate::project_tuple_fields! { [ptr marker] [] [] $($fields)+ }
+        $crate::project_tuple_fields! { [ptr marker $struct] [] [] $($fields)+ }
         drop(marker);
     };
     (let * $($tail:tt)+) => {
         $crate::project_deref!{ [] $($tail)+ }
+    };
+    // why the f `let _ = x;` does not drop `x`
+    (let _ = $val:expr) => {
+        drop($val);
     };
     (let $pat:pat = $val:expr) => {
         let $pat = $val;
@@ -874,21 +916,24 @@ macro_rules! project {
     };
     (( $var:expr ) -> $field:tt $($tail:tt)*) => {
         {
+            $crate::project_deref!( ? [ var ] = $var);
             // use $crate::DoReborrow;
-            let var = core::mem::ManuallyDrop::new($var);
+            let var = core::mem::ManuallyDrop::new(var);
             // let var = unsafe { core::mem::ManuallyDrop::new((&&var).do_reborrow()) };
             let var = {
                 use $crate::Preprocess;
-                (&&&&&var).preprocess()
+                core::mem::ManuallyDrop::new((&&&&&var).preprocess())
             };
 
             let (ptr,marker) = {
                 use $crate::Projectable;
-                (&&&&&&& var).get_raw()
+                (&&&&&&& *var).get_raw()
             };
             let ptr = {
+                use $crate::AmbiguityCheck;
+                let _:() = marker.check();
                 use $crate::CheckNoDeref;
-                // check that (*ptr).field does not go through a deref
+                // check that (*ptr).field would not go through a deref
                 (&&ptr).check_deref()
             };
 
@@ -902,8 +947,7 @@ macro_rules! project {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! project_deref {
-
-    ( [$($parsed:tt)*] = $($tail:tt)* ) => {
+    ( ? [$($parsed:tt)*] = $($tail:tt)* ) => {
         let var = core::mem::ManuallyDrop::new($($tail)*);
         let var = {
             use $crate::Preprocess;
@@ -911,7 +955,27 @@ macro_rules! project_deref {
         };
         let (ptr,marker) = {
             use $crate::DerefProjectable;
-            (&&&&&&&var).deref_raw()
+            (&&&&&& $crate::MaybeDerefProjectable::new(var)).deref_raw()
+        };
+        #[allow(unused_mut)]
+        let mut result = unsafe {
+            use $crate::{ProjectableMarker,Finalizer};
+            let tmp = core::mem::ManuallyDrop::new(marker.from_raw(ptr));
+            (&&&&& tmp).call_finalize()
+        };
+        drop(marker);
+        $crate::project!(let $($parsed)* = result);
+    };
+
+    ( [$($parsed:tt)*] = $($tail:tt)* ) => {
+        let var = core::mem::ManuallyDrop::new($($tail)*);
+        let var = {
+            use $crate::Preprocess;
+            core::mem::ManuallyDrop::new((&&&&&var).preprocess())
+        };
+        let (ptr,marker) = {
+            use $crate::DerefProjectable;
+            (&&&&&&& *var).deref_raw()
         };
         #[allow(unused_mut)]
         let mut result = unsafe {
@@ -930,76 +994,35 @@ macro_rules! project_deref {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! project_tuple_fields {
-    ([$ptr:ident $marker:ident] [$($idx:tt)*] [$($pattern:tt)*] , $($tail:tt)* ) => {
-        $crate::project_field_inner! { [$ptr $marker] { $($idx)* } : $($pattern)* }
-        $crate::project_tuple_fields! { [$ptr $marker] [$($idx)* !] [] $($tail)* }
+    ([$ptr:ident $marker:ident $struct:ident] [$($idx:tt)*] [$($pattern:tt)*] , $($tail:tt)* ) => {
+        $crate::project_field_inner! { [$ptr $marker $struct] { $($idx)* } : $($pattern)* }
+        $crate::project_tuple_fields! { [$ptr $marker $struct] [$($idx)* !] [] $($tail)* }
     };
-    ([$ptr:ident $marker:ident] [$($idx:tt)*] [] ) => {};
-    ([$ptr:ident $marker:ident] [$($idx:tt)*] [] .. ) => {};
+    ([$ptr:ident $marker:ident $struct:ident] [$($idx:tt)*] [] ) => {};
+    ([$ptr:ident $marker:ident $struct:ident] [$($idx:tt)*] [] .. ) => {};
 
-    ([$ptr:ident $marker:ident] [$($idx:tt)*] [$($pattern:tt)*]  $next:tt $($tail:tt)* ) => {
-        $crate::project_tuple_fields! { [$ptr $marker] [$($idx)*] [$($pattern)* $next] $($tail)*  }
+    ([$ptr:ident $marker:ident $struct:ident] [$($idx:tt)*] [$($pattern:tt)*]  $next:tt $($tail:tt)* ) => {
+        $crate::project_tuple_fields! { [$ptr $marker $struct] [$($idx)*] [$($pattern)* $next] $($tail)*  }
     };
-    ([$ptr:ident $marker:ident] [$($idx:tt)*] [$($pattern:tt)*] ) => {
-        $crate::project_field_inner! { [$ptr $marker] { $($idx)* } : $($pattern)* }
+    ([$ptr:ident $marker:ident $struct:ident] [$($idx:tt)*] [$($pattern:tt)*] ) => {
+        $crate::project_field_inner! { [$ptr $marker $struct] { $($idx)* } : $($pattern)* }
     };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! project_struct_fields {
-    ([$ptr:ident $marker:ident] [$name:tt $($pattern:tt)*] , $($tail:tt)* ) => {
-        $crate::project_field_inner! { [$ptr $marker] { $name } $($pattern)* }
-        $crate::project_struct_fields! { [$ptr $marker]  [] $($tail)* }
+    ([$ptr:ident $marker:ident $struct:ident] [$name:tt $($pattern:tt)*] , $($tail:tt)* ) => {
+        $crate::project_field_inner! { [$ptr $marker $struct] { $name } $($pattern)* }
+        $crate::project_struct_fields! { [$ptr $marker $struct]  [] $($tail)* }
     };
-    ([$ptr:ident $marker:ident] [] ) => {};
-    ([$ptr:ident $marker:ident] [] ..) => {};
-    ([$ptr:ident $marker:ident] [$($pattern:tt)*] $next:tt $($tail:tt)* ) => {
-        $crate::project_struct_fields! { [$ptr $marker] [$($pattern)* $next] $($tail)*  }
+    ([$ptr:ident $marker:ident $struct:ident] [] ) => {};
+    ([$ptr:ident $marker:ident $struct:ident] [] ..) => {};
+    ([$ptr:ident $marker:ident $struct:ident] [$($pattern:tt)*] $next:tt $($tail:tt)* ) => {
+        $crate::project_struct_fields! { [$ptr $marker $struct] [$($pattern)* $next] $($tail)*  }
     };
-    ([$ptr:ident $marker:ident] [$name:tt $($pattern:tt)*] ) => {
-        $crate::project_field_inner! { [$ptr $marker] { $name } $($pattern)* }
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! field_addr {
-    ((*$ptr:ident).) => {
-        core::ptr::addr_of_mut!((*$ptr).0)
-    };
-    ((*$ptr:ident).!) => {
-        core::ptr::addr_of_mut!((*$ptr).1)
-    };
-    ((*$ptr:ident).!!) => {
-        core::ptr::addr_of_mut!((*$ptr).2)
-    };
-    ((*$ptr:ident).!!!) => {
-        core::ptr::addr_of_mut!((*$ptr).3)
-    };
-    ((*$ptr:ident).!!!!) => {
-        core::ptr::addr_of_mut!((*$ptr).4)
-    };
-    ((*$ptr:ident).!!!!!) => {
-        core::ptr::addr_of_mut!((*$ptr).5)
-    };
-    ((*$ptr:ident).!!!!!!) => {
-        core::ptr::addr_of_mut!((*$ptr).6)
-    };
-    ((*$ptr:ident).!!!!!!!) => {
-        core::ptr::addr_of_mut!((*$ptr).7)
-    };
-    ((*$ptr:ident).!!!!!!!!) => {
-        core::ptr::addr_of_mut!((*$ptr).8)
-    };
-    ((*$ptr:ident).!!!!!!!!!) => {
-        core::ptr::addr_of_mut!((*$ptr).9)
-    };
-    ((*$ptr:ident).!!!!!!!!!!) => {
-        core::ptr::addr_of_mut!((*$ptr).10)
-    };
-    ((*$ptr:ident).$field:tt) => {
-        core::ptr::addr_of_mut!((*$ptr).$field)
+    ([$ptr:ident $marker:ident $struct:ident] [$name:tt $($pattern:tt)*] ) => {
+        $crate::project_field_inner! { [$ptr $marker $struct] { $name } $($pattern)* }
     };
 }
 
@@ -1014,6 +1037,7 @@ macro_rules! field_addr {
 ///     project!(let Test { x, y } = arg);
 /// }
 /// ```
+///
 /// ```rust,compile_fail
 ///     use projecture::project;
 ///     use core::cell::Cell;
@@ -1021,47 +1045,36 @@ macro_rules! field_addr {
 ///     let tmp = Cell::new(Box::new(Foo(1, 2)));
 ///     let x = project!((&tmp) -> 1);
 /// ```
-#[doc(hidden)]
-#[macro_export]
-macro_rules! deref_field {
-    ((*$ptr:ident).) => {
-        &((*$ptr).0)
-    };
-    ((*$ptr:ident).!) => {
-        &((*$ptr).1)
-    };
-    ((*$ptr:ident).!!) => {
-        &((*$ptr).2)
-    };
-    ((*$ptr:ident).!!!) => {
-        &((*$ptr).3)
-    };
-    ((*$ptr:ident).!!!!) => {
-        &((*$ptr).4)
-    };
-    ((*$ptr:ident).!!!!!) => {
-        &((*$ptr).5)
-    };
-    ((*$ptr:ident).!!!!!!) => {
-        &((*$ptr).6)
-    };
-    ((*$ptr:ident).!!!!!!!) => {
-        &((*$ptr).7)
-    };
-    ((*$ptr:ident).!!!!!!!!) => {
-        &((*$ptr).8)
-    };
-    ((*$ptr:ident).!!!!!!!!!) => {
-        &((*$ptr).9)
-    };
-    ((*$ptr:ident).!!!!!!!!!!) => {
-        &((*$ptr).10)
-    };
-    ((*$ptr:ident).$field:tt) => {
-        &((*$ptr).$field)
-    };
-}
-
+///
+/// ```rust,compile_fail
+/// use projecture::{CustomWrapper, project, Projectable, ProjectableMarker};
+/// struct Test {
+///     f1: usize,
+///     f2: String,
+/// }
+///
+/// impl Test{
+///     fn fold<P,X>(_self: P)
+///     where P: CustomWrapper<Output = X>, X: Projectable<Target = Self>,
+///         X::Marker: ProjectableMarker<usize> + ProjectableMarker<String>,
+/// {
+///         project!(let Self{f1,f2} = _self);
+///     }
+/// }
+/// ```
+///
+/// ```rust,compile_fail
+/// use std::marker::PhantomPinned;
+/// use std::pin::Pin;
+/// use projecture::project;
+/// struct Foo(usize,PhantomPinned);
+/// impl Drop for Foo{
+///     fn drop(&mut self) {}
+/// }
+/// fn test(arg: Pin<&mut Foo>){
+///     let _ = project!(arg -> usize);
+/// }
+/// ```
 #[doc(hidden)]
 #[macro_export]
 macro_rules! not_packed {
@@ -1078,39 +1091,63 @@ macro_rules! not_packed {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! project_field_inner {
-    // ( [$ptr:tt $marker:ident] $field:tt : *? $new_name:ident) => { $crate::project_fields_inner! {[$ptr $marker] $field : *? $new_name , }};
-    // ( [$ptr:tt $marker:ident] { $($field:tt)* } : * $($pattern:tt)* ) => {
-    //     #[allow(unused_mut)]
-    //     let mut tmp = unsafe {
-    //         use $crate::{ProjectableMarker,Finalizer};
-    //         let deref_marker = $crate::DerefMarkerWrapper::new(&$marker);
-    //         // check for #[packed] struct
-    //         if false{
-    //             let _ = $crate::deref_field!((*$ptr). $($field)*);
-    //         }
-    //         let tmp = core::mem::ManuallyDrop::new((&&deref_marker).from_raw($crate::field_addr!((*$ptr). $($field)* )));
-    //         (&&&&& tmp).call_finalize()
-    //     };
-    //     $crate::project!(let $($pattern)* = tmp);
-    //     // $crate::project_fields_inner!{ [$ptr $marker] $($tail)* }
-    // };
-    ( [$ptr:tt $marker:ident] { $($field:tt)* } : $($pattern:tt)* ) => {
+    ( [$($args:tt)*] { } : $($pattern:tt)* ) => {
+        $crate::project_field_inner! { [$($args)*] { 0 } : $($pattern)* }
+    };
+    ( [$($args:tt)*] { ! } : $($pattern:tt)* ) => {
+        $crate::project_field_inner! { [$($args)*] { 1 } : $($pattern)* }
+    };
+    ( [$($args:tt)*] { !! } : $($pattern:tt)* ) => {
+        $crate::project_field_inner! { [$($args)*] { 2 } : $($pattern)* }
+    };
+    ( [$($args:tt)*] { !!! } : $($pattern:tt)* ) => {
+        $crate::project_field_inner! { [$($args)*] { 3 } : $($pattern)* }
+    };
+    ( [$($args:tt)*] { !!!! } : $($pattern:tt)* ) => {
+        $crate::project_field_inner! { [$($args)*] { 4 } : $($pattern)* }
+    };
+    ( [$($args:tt)*] { !!!!! } : $($pattern:tt)* ) => {
+        $crate::project_field_inner! { [$($args)*] { 5 } : $($pattern)* }
+    };
+    ( [$($args:tt)*] { !!!!!! } : $($pattern:tt)* ) => {
+        $crate::project_field_inner! { [$($args)*] { 6 } : $($pattern)* }
+    };
+    ( [$($args:tt)*] { !!!!!!! } : $($pattern:tt)* ) => {
+        $crate::project_field_inner! { [$($args)*] { 7 } : $($pattern)* }
+    };
+    ( [$($args:tt)*] { !!!!!!!! } : $($pattern:tt)* ) => {
+        $crate::project_field_inner! { [$($args)*] { 8 } : $($pattern)* }
+    };
+    ( [$($args:tt)*] { !!!!!!!!! } : $($pattern:tt)* ) => {
+        $crate::project_field_inner! { [$($args)*] { 9 } : $($pattern)* }
+    };
+    ( [$($args:tt)*] { !!!!!!!!!! } : $($pattern:tt)* ) => {
+        $crate::project_field_inner! { [$($args)*] { 10 } : $($pattern)* }
+    };
+    ( [$ptr:tt $marker:ident $type:ident] { $field:tt } $($pattern:tt)* ) => {
+        if false {
+            let $type { $field : _ , .. } = unsafe { &*$ptr };
+        }
+        $crate::project_field_inner! { [$ptr $marker] { $field } $($pattern)* }
+    };
+    ( [$ptr:tt $marker:ident] { $field:tt } : $($pattern:tt)* ) => {
         #[allow(unused_mut)]
         let mut tmp = unsafe {
             use $crate::{ProjectableMarker,Finalizer,SupportsPacked};
             // check for #[packed] struct
             #[forbid(unaligned_references)]
+            #[allow(dead_code)]
             if false{
-                $crate::not_packed! { Foo $($field)* }
+                $crate::not_packed! { Foo $field }
                 let check_ptr = ( &&($ptr, &$marker, core::marker::PhantomData::<Foo>) ).select();
-                let _ = $crate::deref_field!((*check_ptr). $($field)*);
+                let _ = &(*check_ptr). $field;
             }
-            fn create_uninit<T>(ptr: *mut T) -> core::mem::MaybeUninit<T>{ core::mem::MaybeUninit::uninit() }
+            fn create_uninit<T>(_ptr: *mut T) -> core::mem::MaybeUninit<T>{ core::mem::MaybeUninit::uninit() }
             let mut mu = create_uninit($ptr);
             let mu_ptr = mu.as_mut_ptr();
-            let mu_field_ptr = $crate::field_addr!((*mu_ptr). $($field)* );
+            let mu_field_ptr = core::ptr::addr_of_mut!((*mu_ptr). $field );
             let offset = (mu_field_ptr as *mut u8).offset_from(mu_ptr as *mut u8);
-            fn do_offset<T,U>(ptr:*mut T, field_ptr_type: *mut U, offset: isize) -> *mut U{
+            fn do_offset<T,U>(ptr:*mut T, _field_ptr_type: *mut U, offset: isize) -> *mut U{
                 (ptr as *mut u8).wrapping_offset(offset) as *mut U
             }
             let field_ptr = do_offset($ptr, mu_field_ptr, offset);
@@ -1120,23 +1157,48 @@ macro_rules! project_field_inner {
         $crate::project!(let $($pattern)* = tmp);
 
     };
-    // ( [$ptr:tt $marker:ident] { $($field:tt)* } : *? $new_name:ident , $($tail:tt)*) => {
-    //     let $new_name = unsafe {
-    //         use $crate::{ProjectableMarker,Finalizer};
-    //         let deref_marker = $crate::MaybeDerefMarkerWrapper::new(&$marker);
-    //         let tmp = core::mem::ManuallyDrop::new((&&deref_marker).from_raw($crate::field_addr!((*$ptr). $($field)* )));
-    //         (&&&& tmp).call_finalize()
-    //     };
-    //     $crate::project_fields_inner!{ [$ptr $marker] $($tail)* }
-    // };
-    // ( [$ptr:tt $marker:ident] $field:tt : $new_name:pat) => { $crate::project_fields_inner! { [$ptr $marker] $field : $new_name , } };
-    // ( [$ptr:tt $marker:ident] $field:tt : * $new_name:pat) => { $crate::project_fields_inner! {[$ptr $marker] $field : * $new_name , }};
-
-    // ( [$ptr:tt $marker:ident] $field:tt : $($tail:tt)* ) => { $crate::project_fields_inner! {[$ptr $marker] { $field } : $($tail)* }};
-    // ( [$ptr:tt $marker:ident] * $field:tt $($tail:tt)*) => { $crate::project_fields_inner! { [$ptr $marker] $field : * $field $($tail)* } };
     ( [$ptr:tt $marker:ident] { $field:ident } ) => { $crate::project_field_inner! { [$ptr $marker] { $field } : $field } };
-    // ( [$ptr:tt $marker:ident] ) => {};
 }
+
+// todo currently that would be unsound because it would circumvent PinDrop requirement on Pin projection (╥﹏╥)
+// trait Foldable<X, F> {
+//     fn fold_fields(_self: X, folder: &mut F);
+// }
+//
+// trait FoldsWith<F> {
+//     fn accept<S:SettingsHList>(&mut self, field: F, settings: S);
+// }
+// type Opaque;
+//
+// trait SettingsHList{
+//     fn get_setting<T>(&self) -> Option<&T>;
+// }
+//
+// struct Test {
+//     #[serde::Rename("name"),serde::Skip,clap::Short],
+//     f1: usize,
+//     f2: alloc::string::String,
+// }
+//
+// impl<P: CustomWrapper<Output = X>, X: Projectable<Target = Self>, F> Foldable<P, F> for Test
+// where
+//     X::Marker: ProjectableMarker<usize> + ProjectableMarker<alloc::string::String>,
+//     F: FoldsWith<<X::Marker as ProjectableMarker<usize>>::Output>
+//         + FoldsWith<<X::Marker as ProjectableMarker<alloc::string::String>>::Output>,
+// {
+//     fn fold_fields(_self: P, folder: &mut F) {
+//         project!(let Self{f1,f2} = _self);
+//         let f1_settings = HList(serde::Rename("name"),HList(serde::Skip,HList(clap::Short,HCons)));
+//         folder.accept(f1,&f1_settings);
+//         let f2_settings = HCons;
+//         folder.accept(f2);
+//     }
+// }
 
 //todo:
 // pattern matching/enums
+// foldable trait
+//
+
+#[cfg(any())]
+mod experiments;
