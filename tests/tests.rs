@@ -1,4 +1,4 @@
-#![feature(arbitrary_self_types)]
+// #![feature(arbitrary_self_types)]
 use projecture::{pin_projectable, project, OptionMarker};
 use std::cell::Cell;
 use std::fmt::Debug;

@@ -13,11 +13,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test-nightly:
+    name: test nightly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-2022-09-29
+          default: true
+          profile: minimal
+      - name: miri tests
+        env:
+          MIRI_FLAGS: -Zmiri-strict-provenance
+        run: |
+          rustup component add miri
+          cargo miri test --no-fail-fast --all-features
+
   tests:
     strategy:
       fail-fast: false
       matrix:
-        rust_version: [1.54, 1.61, nightly-2022-06-21]
+        rust_version: [1.54, 1.63]
     name: cargo test
     runs-on: ubuntu-latest
     steps:
@@ -32,13 +50,6 @@ jobs:
       - name: Build
         run: cargo build --verbose
       - name: Run tests
-        run: cargo test --verbose --no-fail-fast --all-features
-      - name: miri tests
-        if: startsWith(matrix.rust_version , 'nightly')
-        env:
-          MIRI_FLAGS: -Zmiri-strict-provenance
-        run: |
-          rustup component add miri
-          cargo miri test --no-fail-fast --all-features
+        run: cargo test --verbose --no-fail-fast --features macro_rules_attribute,atomic
       - name: Formatting
         run: cargo fmt -- --check

@@ -1202,25 +1202,31 @@ impl<'a, T: DerefOwned> DropLeftovers<'a, T> {
     }
 }
 
-/// ```rust
-/// #![feature(arbitrary_self_types)]
-/// # use std::marker::PhantomData;
-/// # use std::mem::ManuallyDrop;
-/// # use projecture::{DerefOwned, DropLeftovers, OwningRef};
-/// trait Trait{
-///     fn test(self: OwningRef<'_,Self>);
-/// }
-///
-/// impl Trait for String{
-///     fn test(self: OwningRef<'_, Self>) {
-///         assert_eq!("test", self.deref_owned());
-///     }
-/// }
-///
-/// let x = Box::new(String::from("test")) as Box<dyn Trait>;
-/// DropLeftovers::new(x).deref_as_owning().test()
-/// ```
+#[cfg_attr(
+    feature = "nightly",
+    doc = "
+```rust
+#![feature(arbitrary_self_types)]
+# use std::marker::PhantomData;
+# use std::mem::ManuallyDrop;
+# use projecture::{DerefOwned, DropLeftovers, OwningRef};
+trait Trait{
+    fn test(self: OwningRef<'_,Self>);
+}
+
+impl Trait for String{
+    fn test(self: OwningRef<'_, Self>) {
+        assert_eq!(\"test\", self.deref_owned());
+    }
+}
+
+let x = Box::new(String::from(\"test\")) as Box<dyn Trait>;
+DropLeftovers::new(x).deref_as_owning().test()
+```
+"
+)]
 pub struct OwningRef<'a, T: 'a + ?Sized>(*mut T, PhantomData<fn(&'a ()) -> &'a ()>);
+
 impl<T: ?Sized> Drop for OwningRef<'_, T> {
     fn drop(&mut self) {
         unsafe { drop_in_place(self.0) }
