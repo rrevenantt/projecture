@@ -1,6 +1,6 @@
 [package]
 name = "projecture"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2018"
 authors = ["Konstantin Anisimov <rrevenantt@gmail.com>"]
 homepage = "https://github.com/rrevenantt/projecture"
@@ -16,11 +16,13 @@ license = "MIT"
 [features]
 default = ["std"]
 std = []
+nightly =  []
 
 
 [dependencies]
 pin-project = { version = "1", optional = true }
 atomic = { version = "0.5.1", optional = true, default-features = false }
+macro_rules_attribute = { version = "0.1" , optional = true }
 
 [dev-dependencies]
 backtrace = "0.3.65"

@@ -1,5 +1,9 @@
 #![no_std]
 #![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "nightly", feature(dispatch_from_dyn))]
+#![cfg_attr(feature = "nightly", feature(unsize))]
+#![cfg_attr(feature = "nightly", feature(arbitrary_self_types))]
+#![cfg_attr(feature = "nightly", feature(dropck_eyepatch))]
 
 #[cfg(feature = "std")]
 extern crate alloc;
@@ -8,12 +12,12 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::cell::{Cell, UnsafeCell};
 use core::convert::Infallible;
-use core::marker::PhantomData;
+use core::marker::{PhantomData, PhantomPinned};
 use core::mem::{transmute_copy, ManuallyDrop, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
 use core::ptr;
-use core::ptr::NonNull;
+use core::ptr::{drop_in_place, null_mut, NonNull};
 
 /// Support for atomic types projection
 #[cfg(feature = "atomic")]
@@ -31,6 +35,8 @@ pub use option::OptionMarker;
 mod option;
 mod refcell;
 
+pub mod generic;
+
 // helper to wrap `T` `&T` and `&mut T` to prevent conflicting implementations when doing autoderef specialization
 #[doc(hidden)]
 pub unsafe trait Preprocess {
@@ -44,7 +50,7 @@ pub unsafe trait Preprocess {
 // wrapper to prevent overlapping implementations
 #[doc(hidden)]
 #[repr(transparent)]
-pub struct Owned<T>(UnsafeCell<ManuallyDrop<T>>);
+pub struct Owned<T>(ManuallyDrop<T>);
 unsafe impl<T> Preprocess for ManuallyDrop<T> {
     type Output = Owned<T>;
 
@@ -67,6 +73,13 @@ unsafe impl<T> Preprocess for ManuallyDrop<T> {
 #[doc(hidden)]
 #[repr(transparent)]
 pub struct Helper<T>(T);
+impl<T: Deref> Deref for Helper<T> {
+    type Target = T::Target;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
 unsafe impl<'a, T> Preprocess for &&ManuallyDrop<&'a T> {
     type Output = Helper<&'a T>;
 
@@ -215,6 +228,7 @@ pub unsafe trait DerefProjectable {
 // #[doc(hidden)]
 /// Marker type for the projections used in this crate.
 /// You can use that if you need to reuse existing projections.
+// #[derive(Copy,Clone)]
 pub struct Marker<T>(PhantomData<T>);
 impl<T> Marker<T> {
     pub fn new() -> Self {
@@ -222,6 +236,11 @@ impl<T> Marker<T> {
     }
 
     pub fn check(&self) {}
+}
+impl<T> Clone for Marker<T> {
+    fn clone(&self) -> Self {
+        Marker::new()
+    }
 }
 
 #[doc(hidden)]
@@ -335,49 +354,59 @@ unsafe impl<ToCheck, NotPacked> SupportsPacked
     type Result = NotPacked;
 }
 
-/// Implement this if your type can be unwrapped on a dereference operation when doing
-/// destructuring projection
-pub trait DerefOwned: Deref {
+/// Version of `Deref` trait that allows moving out `Self::Target` from `Self` by value.
+pub trait DerefOwned: DerefMut {
     /// Drops what's left of `Self` when `Self::Target` was moved out
     ///
-    /// Safety requirements: must not be called twice on the same instance
+    /// Safety requirements: must not be called twice on the same instance,
+    /// implementation must not access `Self::Target`
     unsafe fn drop_leftovers(_leftovers: &mut ManuallyDrop<Self>) {}
-    /// Safety requirements: must not be called twice on the same instance
-    unsafe fn move_out_target(md: &mut ManuallyDrop<Self>) -> Self::Target
-    where
-        Self::Target: Sized,
-    {
-        ptr::read(&***md)
-    }
+    // /// Safety requirements: must not be called twice on the same instance
+    // unsafe fn move_out_target(md: &mut ManuallyDrop<Self>) -> Self::Target
+    // where
+    //     Self::Target: Sized,
+    // {
+    //     /// need to go through `deref_mut` because we need to ensure that we have unique access to `Self::Target`
+    //     /// otherwise it would be possible to move out from `Rc`
+    //     ptr::read(&*(**md).deref_mut())
+    // }
+
     fn deref_owned(self) -> Self::Target
     where
         Self: Sized,
         Self::Target: Sized,
     {
-        let mut md = ManuallyDrop::new(self);
-        let target = unsafe { Self::move_out_target(&mut md) };
-        unsafe {
-            Self::drop_leftovers(&mut md);
-        }
-        target
+        let mut x = DropLeftovers::new(self);
+        unsafe { ManuallyDrop::new(x.deref_as_owning()).0.read() }
+    }
+}
+
+impl<T> DerefOwned for Pin<T>
+where
+    T::Target: Unpin,
+    T: DerefOwned,
+{
+    unsafe fn drop_leftovers(_leftovers: &mut ManuallyDrop<Self>) {
+        T::drop_leftovers(unsafe { &mut *(_leftovers as *mut _ as *mut ManuallyDrop<T>) })
     }
 }
 
 #[cfg(feature = "std")]
-impl<T> DerefOwned for Box<T> {
+impl<T: ?Sized> DerefOwned for Box<T> {
     unsafe fn drop_leftovers(leftovers: &mut ManuallyDrop<Self>) {
         ManuallyDrop::drop(&mut *(leftovers as *mut _ as *mut ManuallyDrop<Box<ManuallyDrop<T>>>))
     }
 }
 
 #[doc(hidden)]
-pub struct OwnedDropMarker<T: DerefOwned>(*const UnsafeCell<ManuallyDrop<T>>);
+pub struct OwnedDropMarker<T: DerefOwned>(*const ManuallyDrop<T>);
 // impl<T: DerefOwned> OwnedDropMarker<T> {
 //     pub fn check() {}
 // }
 impl<'a, T: DerefOwned> Drop for OwnedDropMarker<T> {
     fn drop(&mut self) {
-        unsafe { T::drop_leftovers(&mut *(*self.0).get()) }
+        let mut temp = unsafe { ptr::read(self.0) };
+        unsafe { T::drop_leftovers(&mut temp) }
     }
 }
 
@@ -386,10 +415,11 @@ unsafe impl<T: DerefOwned> DerefProjectable for Owned<T> {
     type Marker = OwnedDropMarker<T>;
 
     fn deref_raw(&self) -> (*mut Self::Target, Self::Marker) {
-        let ptr = unsafe { &***self.0.get() } as *const _ as _;
+        let ptr = unsafe { &**self.0 } as *const _ as _;
         (ptr, OwnedDropMarker(&self.0))
     }
 }
+
 impl<X: DerefOwned, T> ProjectableMarker<T> for OwnedDropMarker<X> {
     type Output = T;
 
@@ -430,7 +460,7 @@ unsafe impl<'a, T: DerefMut> DerefProjectable for &Helper<&'a mut T> {
 }
 unsafe impl<'a, T: DerefMut> DerefProjectable for Helper<&'a mut Pin<T>> {
     type Target = T::Target;
-    type Marker = Marker<Pin<&'a mut ()>>;
+    type Marker = PinMarker<Marker<&'a mut ()>>;
 
     fn deref_raw(&self) -> (*mut Self::Target, Self::Marker) {
         (
@@ -440,7 +470,7 @@ unsafe impl<'a, T: DerefMut> DerefProjectable for Helper<&'a mut Pin<T>> {
                     .as_mut()
                     .get_unchecked_mut()
             },
-            Marker::new(),
+            PinMarker(Marker::new()),
         )
     }
 }
@@ -479,10 +509,13 @@ unsafe impl<'a, T: Deref> DerefProjectable for Helper<&'a T> {
 }
 unsafe impl<'a, T: Deref> DerefProjectable for &Helper<&'a Pin<T>> {
     type Target = T::Target;
-    type Marker = Marker<Pin<&'a ()>>;
+    type Marker = PinMarker<Marker<&'a ()>>;
 
     fn deref_raw(&self) -> (*mut Self::Target, Self::Marker) {
-        (self.0.as_ref().get_ref() as *const _ as _, Marker::new())
+        (
+            self.0.as_ref().get_ref() as *const _ as _,
+            PinMarker(Marker::new()),
+        )
     }
 }
 // impl<'a, T: Deref + 'a> ProjectableMarker<T> for DerefMarkerWrapper<Marker<&'a ()>> {
@@ -783,7 +816,8 @@ unsafe impl<ToCheck, NotPacked> SupportsPacked
 /// ```rust
 /// #    use std::marker::PhantomPinned;
 /// #    use std::pin::Pin;
-/// #    use projecture::{project, Unpinned};
+/// #    use projecture::{project, Unpinned,PinProjectable};
+///     #[macro_rules_attribute::derive(PinProjectable!)]
 ///     struct Foo<T, U: Unpin, V> {
 ///         a: usize,
 ///         b: T,
@@ -805,8 +839,8 @@ unsafe impl<ToCheck, NotPacked> SupportsPacked
 /// ```rust
 /// # use std::marker::PhantomPinned;
 /// # use std::pin::Pin;
-/// # use projecture::project;
-/// #[derive(Default)]
+/// # use projecture::{project,PinProjectable};
+/// #[macro_rules_attribute::derive(Default,PinProjectable!)]
 /// struct Foo{
 ///     x: Box<usize>,
 ///     y: usize,
@@ -821,10 +855,11 @@ unsafe impl<ToCheck, NotPacked> SupportsPacked
 /// let x: Option<Box<usize>> = x;
 /// let y: Option<usize> = y;
 ///
-/// fn test_pin(arg: Option<Pin<&mut Foo>>){
-///     project!(let Foo { p, ..} = arg );
-///     let p: Option<Pin<&mut PhantomPinned>> = p;
-/// }
+/// # // todo
+/// # // fn test_pin(arg: Option<Pin<&mut Foo>>){
+/// # //     project!(let Foo { p, ..} = arg );
+/// # //     let p: Option<Pin<&mut PhantomPinned>> = p;
+/// # // }
 /// ```
 /// `Ref`/`RefMut` projection
 /// ```rust
@@ -872,11 +907,11 @@ macro_rules! project {
             use $crate::Projectable;
             (&&&&&&& *var).get_raw()
         };
-        if false{
-            use $crate::AmbiguityCheck;
-            let _:() = marker.check();
-            // let $struct { .. } = unsafe { &*ptr };
-        }
+        // if false{
+        //     use $crate::AmbiguityCheck;
+        //     let _:() = marker.check();
+        //     // let $struct { .. } = unsafe { &*ptr };
+        // }
         $crate::project_struct_fields! { [ptr marker $struct] [] $($fields)+ }
         drop(marker);
     };
@@ -890,11 +925,11 @@ macro_rules! project {
             use $crate::Projectable;
             (&&&&&&& *var).get_raw()
         };
-        if false{
-            use $crate::AmbiguityCheck;
-            let _:() = marker.check();
-            // let $struct { .. } = unsafe{ &*ptr };
-        }
+        // if false{
+        //     use $crate::AmbiguityCheck;
+        //     let _:() = marker.check();
+        //     // let $struct { .. } = unsafe{ &*ptr };
+        // }
 
         $crate::project_tuple_fields! { [ptr marker $struct] [] [] $($fields)+ }
         drop(marker);
@@ -902,7 +937,8 @@ macro_rules! project {
     (let * $($tail:tt)+) => {
         $crate::project_deref!{ [] $($tail)+ }
     };
-    // why the f `let _ = x;` does not drop `x`
+    // why the f `let _ = x;` does not drop `x` ?!!
+    // and at the same time `let _ = Foo;` does drop `Foo` ... , like wtf?!!
     (let _ = $val:expr) => {
         drop($val);
     };
@@ -930,8 +966,8 @@ macro_rules! project {
                 (&&&&&&& *var).get_raw()
             };
             let ptr = {
-                use $crate::AmbiguityCheck;
-                let _:() = marker.check();
+                // use $crate::AmbiguityCheck;
+                // let _:() = marker.check();
                 use $crate::CheckNoDeref;
                 // check that (*ptr).field would not go through a deref
                 (&&ptr).check_deref()
@@ -1047,23 +1083,6 @@ macro_rules! project_struct_fields {
 /// ```
 ///
 /// ```rust,compile_fail
-/// use projecture::{CustomWrapper, project, Projectable, ProjectableMarker};
-/// struct Test {
-///     f1: usize,
-///     f2: String,
-/// }
-///
-/// impl Test{
-///     fn fold<P,X>(_self: P)
-///     where P: CustomWrapper<Output = X>, X: Projectable<Target = Self>,
-///         X::Marker: ProjectableMarker<usize> + ProjectableMarker<String>,
-/// {
-///         project!(let Self{f1,f2} = _self);
-///     }
-/// }
-/// ```
-///
-/// ```rust,compile_fail
 /// use std::marker::PhantomPinned;
 /// use std::pin::Pin;
 /// use projecture::project;
@@ -1160,40 +1179,82 @@ macro_rules! project_field_inner {
     ( [$ptr:tt $marker:ident] { $field:ident } ) => { $crate::project_field_inner! { [$ptr $marker] { $field } : $field } };
 }
 
-// todo currently that would be unsound because it would circumvent PinDrop requirement on Pin projection (╥﹏╥)
-// trait Foldable<X, F> {
-//     fn fold_fields(_self: X, folder: &mut F);
-// }
-//
-// trait FoldsWith<F> {
-//     fn accept<S:SettingsHList>(&mut self, field: F, settings: S);
-// }
-// type Opaque;
-//
-// trait SettingsHList{
-//     fn get_setting<T>(&self) -> Option<&T>;
-// }
-//
-// struct Test {
-//     #[serde::Rename("name"),serde::Skip,clap::Short],
-//     f1: usize,
-//     f2: alloc::string::String,
-// }
-//
-// impl<P: CustomWrapper<Output = X>, X: Projectable<Target = Self>, F> Foldable<P, F> for Test
-// where
-//     X::Marker: ProjectableMarker<usize> + ProjectableMarker<alloc::string::String>,
-//     F: FoldsWith<<X::Marker as ProjectableMarker<usize>>::Output>
-//         + FoldsWith<<X::Marker as ProjectableMarker<alloc::string::String>>::Output>,
-// {
-//     fn fold_fields(_self: P, folder: &mut F) {
-//         project!(let Self{f1,f2} = _self);
-//         let f1_settings = HList(serde::Rename("name"),HList(serde::Skip,HList(clap::Short,HCons)));
-//         folder.accept(f1,&f1_settings);
-//         let f2_settings = HCons;
-//         folder.accept(f2);
-//     }
-// }
+/// Keeps track of stuff that was left of `T` when we moved out `T::Target` from it.
+pub struct DropLeftovers<'a, T: DerefOwned>(
+    // workaround to not require #[may_dangle] on 'a
+    DropLeftoversInner<T>,
+    PhantomData<fn(&'a ()) -> &'a ()>,
+);
+struct DropLeftoversInner<T: DerefOwned>(ManuallyDrop<T>);
+impl<T: DerefOwned> Drop for DropLeftoversInner<T> {
+    fn drop(&mut self) {
+        unsafe { T::drop_leftovers(&mut self.0) }
+    }
+}
+
+impl<'a, T: DerefOwned> DropLeftovers<'a, T> {
+    pub fn new(val: T) -> Self {
+        Self(DropLeftoversInner(ManuallyDrop::new(val)), PhantomData)
+    }
+
+    pub fn deref_as_owning(&'a mut self) -> OwningRef<'a, T::Target> {
+        OwningRef((*self.0 .0).deref_mut(), PhantomData)
+    }
+}
+
+/// ```rust
+/// #![feature(arbitrary_self_types)]
+/// # use std::marker::PhantomData;
+/// # use std::mem::ManuallyDrop;
+/// # use projecture::{DerefOwned, DropLeftovers, OwningRef};
+/// trait Trait{
+///     fn test(self: OwningRef<'_,Self>);
+/// }
+///
+/// impl Trait for String{
+///     fn test(self: OwningRef<'_, Self>) {
+///         assert_eq!("test", self.deref_owned());
+///     }
+/// }
+///
+/// let x = Box::new(String::from("test")) as Box<dyn Trait>;
+/// DropLeftovers::new(x).deref_as_owning().test()
+/// ```
+pub struct OwningRef<'a, T: 'a + ?Sized>(*mut T, PhantomData<fn(&'a ()) -> &'a ()>);
+impl<T: ?Sized> Drop for OwningRef<'_, T> {
+    fn drop(&mut self) {
+        unsafe { drop_in_place(self.0) }
+    }
+}
+
+impl<'a, T: ?Sized + 'a> Deref for OwningRef<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.0 }
+    }
+}
+impl<'a, T: ?Sized + 'a> DerefMut for OwningRef<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.0 }
+    }
+}
+impl<'a, T: 'a> DerefOwned for OwningRef<'a, T> {}
+
+#[cfg(feature = "nightly")]
+impl<'a, T: ?Sized, U: ?Sized> core::ops::DispatchFromDyn<OwningRef<'a, U>> for OwningRef<'a, T> where
+    T: core::marker::Unsize<U>
+{
+}
+
+pub struct OwningMarker<'a, T>(&'a mut ManuallyDrop<T>);
+impl<'a, T> ProjectableMarker<T> for OwningMarker<'a, T> {
+    type Output = T;
+
+    unsafe fn from_raw(&self, raw: *mut T) -> Self::Output {
+        ptr::read(raw as *const T)
+    }
+}
 
 //todo:
 // pattern matching/enums

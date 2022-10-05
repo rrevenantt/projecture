@@ -4,16 +4,16 @@
 so use it on your own risk meanwhile if you are good with unsafe rust i would appreciate a soundness review**
 
 Allows to do almost arbitrary type projections. In comparison to other crates that do similar things
-it is not just more generic as such requires much less transitive dependencies
+it is more generic, does not require procedural macros 
 and also does not impose additional requirements on target struct,
-if target struct is located in external crate that crate does not have to explicitly add a support such projection.
+if target struct is located in external crate that crate does not have to explicitly add a support for such projection(pin projection is an exception here).
 
 Although as of now this crate doesn't support enums yet, but it will be added later.
 
 #### Currently can do following type of projections
 - Destructuring projection (similar to usual `let <pattern>` but also supports deref pattern,
   and also works if struct implements `Drop` which is just not called). <br>
-  **Note** that due to limitations of declaration macros currently unmentioned fields are leaked.
+  **Note** that due to limitations of declaration macros currently unmentioned fields will be leaked.
 - Reference(`&`, `&mut`) projection (similar to match ergonomics in `let <pattern>` but also supports deref pattern)
 - `Pin` projection
 - `Cell` projection
@@ -23,7 +23,14 @@ Although as of now this crate doesn't support enums yet, but it will be added la
 - `RefCell` guards projection
 - raw pointers projections (`*const T`, `*mut T`, `NonNull<T>`)
 
-Also, where possible, projections can additionally project through a `Deref` type.
+Also adds two types of projectable pointers: 
+- [`generic::GenericPointer`] - makes it possible to write code that is generic over the reference type.
+- [`OwningRef`] - reference that semantically owns data (sometimes referred as `&own T` in various proposals). 
+On nightly(with `nightly` feature) it allows you to make object safe traits that accept `Self` by value.
+
+Where possible, projections can additionally project through a `Deref`
+(including dereference by value via [`DerefOwned`]).
+
 
 Here is a general overview of what you can do, see [`project`]! macro for more usage details.
 ```rust
@@ -33,6 +40,7 @@ Here is a general overview of what you can do, see [`project`]! macro for more u
 #    use std::rc::Rc;
 #    use atomic::Atomic;
 #    use projecture::project;
+#    use projecture::pin_projectable;
     struct Foo {
         a: Bar,
         b: Rc<Cell<Bar>>,
@@ -41,6 +49,8 @@ Here is a general overview of what you can do, see [`project`]! macro for more u
     }
 
     struct Bar(usize,PhantomPinned);
+    // needed only for pin projections
+    pin_projectable!(Bar);
 
     fn test(arg: &Foo) {
         project!(
@@ -52,13 +62,13 @@ Here is a general overview of what you can do, see [`project`]! macro for more u
         } = arg);
         let _: &usize = e;
         let _: &Cell<usize> = cell;
-        let _: &Atomic<usize> = atomic;
         let _: Pin<& PhantomPinned> = f;
+        let _: &Atomic<usize> = atomic;
 
         let _: &usize = project!(arg -> a -> 0);
         let _: &Cell<usize> = project!(arg -> b -> 0);
-        let _: &Atomic<usize> = project!(arg -> d -> 0);
         let _: Pin<& PhantomPinned> = project!(arg -> c -> 1);
+        let _: &Atomic<usize> = project!(arg -> d -> 0);
     }
 ```
 
